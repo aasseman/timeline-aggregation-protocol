@@ -1,5 +1,6 @@
 // manager_server.rs
 use anyhow::Result;
+use jsonrpsee::http_client::HttpClient;
 use tap_core::tap_manager::RAVRequest;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,7 +30,7 @@ pub struct RpcManager
     initial_checks: Vec<ReceiptCheck>,
     receipt_count: Arc<AtomicU64>,
     threshold: u64,
-    aggregate_server_address: String,
+    aggregator_client: HttpClient,
 }
 
 impl < CA: CollateralAdapter+Sync+Send+'static,
@@ -51,7 +52,9 @@ impl < CA: CollateralAdapter+Sync+Send+'static,
             initial_checks,
             receipt_count: Arc::new(AtomicU64::new(0)),
             threshold,
-            aggregate_server_address,
+            aggregator_client: HttpClientBuilder::default()
+                    .build(format!("{}", aggregate_server_address))
+                    .unwrap(),
         }
     }
 }
@@ -87,11 +90,6 @@ async fn request(&self,
                 // Reset the counter after reaching the threshold
                 self.receipt_count.store(0, Ordering::SeqCst);
 
-                // Connect to the other server
-                let client = HttpClientBuilder::default()
-                    .build(format!("{}", self.aggregate_server_address))
-                    .unwrap();
-
                 println!("Requesting RAV...");
                 // Create the aggregate_receipts request params
                 let time_stamp_buffer = 0;
@@ -101,7 +99,7 @@ async fn request(&self,
                     Ok(rav) => {
                         let params = rpc_params!(&rav.valid_receipts, None::<()>);
                         // Call the aggregate_receipts method on the other server
-                        let remote_rav_result: Result<EIP712SignedMessage<ReceiptAggregateVoucher>, _> = client.request("aggregate_receipts", params).await;
+                        let remote_rav_result: Result<EIP712SignedMessage<ReceiptAggregateVoucher>, _> = self.aggregator_client.request("aggregate_receipts", params).await;
                         
                         match remote_rav_result {
                             Ok(remote_rav) => {
