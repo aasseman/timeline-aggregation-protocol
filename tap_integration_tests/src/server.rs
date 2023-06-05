@@ -1,5 +1,6 @@
 // manager_server.rs
 use anyhow::Result;
+use tap_core::tap_manager::RAVRequest;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -94,12 +95,7 @@ async fn request(&self,
                 println!("Requesting RAV...");
                 // Create the aggregate_receipts request params
                 let time_stamp_buffer = 0;
-                let rav_result = tokio::task::spawn_blocking(move || {
-                    manager_clone_rav.lock().unwrap().create_rav_request(time_stamp_buffer)
-                }).await.map_err(|e| jsonrpsee::types::ErrorObject::owned(
-                    -32000,
-                    format!("Failed to spawn task: {}", e),
-                    None::<()>))?;
+                let rav_result = request_rav(manager_clone_rav, time_stamp_buffer).await;
 
                 match rav_result {
                     Ok(rav) => {
@@ -153,6 +149,30 @@ async fn request(&self,
         )),
     }
 }
+}
+
+pub async fn request_rav<CA: CollateralAdapter+Sync+Send+'static,
+RCA: ReceiptChecksAdapter+Sync+Send+'static,
+RSA: ReceiptStorageAdapter+Sync+Send+'static,
+RAVSA: RAVStorageAdapter+Sync+Send+'static> (
+    manager: Arc<Mutex<Manager<CA, RCA, RSA, RAVSA>>>,
+    time_stamp_buffer: u64,
+) -> Result<RAVRequest, jsonrpsee::types::ErrorObjectOwned> {
+    let result = tokio::task::spawn_blocking(move || {
+        manager.lock().unwrap().create_rav_request(time_stamp_buffer)
+    }).await.map_err(|e| jsonrpsee::types::ErrorObject::owned(
+        -32000,
+        format!("Failed to spawn task: {}", e),
+        None::<()>))?;
+
+    match result {
+        Ok(rav) => Ok(rav),
+        Err(e) => Err(jsonrpsee::types::ErrorObject::owned(
+            -32000,
+            e.to_string(),
+            None::<()>,
+        )),
+    }
 }
 
 pub async fn run_server<CA: CollateralAdapter+Sync+Send+'static,
