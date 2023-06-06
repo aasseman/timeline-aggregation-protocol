@@ -1,9 +1,11 @@
 use ethers::signers::coins_bip39::English;
 use ethers::signers::{LocalWallet, MnemonicBuilder, Signer};
 use ethers::types::{Address, H160};
+use futures::Future;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rstest::*;
+use tokio::join;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::iter::FromIterator;
@@ -269,3 +271,129 @@ async fn test_manager_one_servers(
     Ok(())
 }
 
+#[rstest]
+#[tokio::test]
+async fn test_manager_two_servers(
+    collateral_adapter: (CollateralAdapterMock, CollateralAdapterMock),
+    receipt_storage_adapter: (ReceiptStorageAdapterMock, ReceiptStorageAdapterMock),
+    receipt_checks_adapter: (ReceiptChecksAdapterMock, ReceiptChecksAdapterMock),
+    rav_storage_adapter: (RAVStorageAdapterMock, RAVStorageAdapterMock),
+    keys: (LocalWallet, Address),
+    query_price: Vec<u128>,
+    initial_checks: Vec<ReceiptCheck>,
+    required_checks: Vec<ReceiptCheck>,
+    receipt_threshold_1: u64,
+    receipt_threshold_2: u64,
+    num_batches: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use jsonrpsee::core::client::ClientT;
+    use jsonrpsee::http_client::HttpClientBuilder;
+    use tap_aggregator::server as agg_server;
+    use tap_core::eip_712_signed_message::EIP712SignedMessage;
+    use tap_core::tap_receipt::Receipt;
+
+    let mut collateral_adapter_1 = collateral_adapter.0;
+    let receipt_checks_adapter_1 = receipt_checks_adapter.0;
+    let receipt_storage_adapter_1 = receipt_storage_adapter.0;
+    let rav_storage_adapter_1 = rav_storage_adapter.0;
+
+    let mut collateral_adapter_2 = collateral_adapter.1;
+    let receipt_checks_adapter_2 = receipt_checks_adapter.1;
+    let receipt_storage_adapter_2 = receipt_storage_adapter.1;
+    let rav_storage_adapter_2 = rav_storage_adapter.1;
+
+    let initial_checks = initial_checks;
+    let required_checks = required_checks;
+
+    let gateway_id = keys.clone().1;
+    let value: u128 = query_price.clone().into_iter().sum();
+    collateral_adapter_1.increase_collateral(gateway_id, value);
+    collateral_adapter_2.increase_collateral(gateway_id, value);
+    let threshold_1 = receipt_threshold_1;
+    let threshold_2 = receipt_threshold_2;
+    let aggregate_server_address = "http://127.0.0.1:".to_string() + &http_port_tap_aggregator().to_string();
+    let server_1_address = "http://127.0.0.1:".to_string() + &http_port_indexer_1().to_string();
+    let server_2_address = "http://127.0.0.1:".to_string() + &http_port_indexer_2().to_string();
+    let (_server_handle, _) = server::run_server(
+        http_port_indexer_1(),
+        collateral_adapter_1,
+        receipt_checks_adapter_1,
+        receipt_storage_adapter_1,
+        rav_storage_adapter_1,
+        initial_checks.clone(),
+        required_checks.clone(),
+        threshold_1,
+        aggregate_server_address.clone(),
+    )
+    .await
+    .expect("Failed to start server");
+
+    let (_server_handle, _) = server::run_server(
+        http_port_indexer_2(),
+        collateral_adapter_2,
+        receipt_checks_adapter_2,
+        receipt_storage_adapter_2,
+        rav_storage_adapter_2,
+        initial_checks,
+        required_checks,
+        threshold_2,
+        aggregate_server_address,
+    )
+    .await
+    .expect("Failed to start server");
+    // Start tap_aggregate server
+    let (_handle, _local_addr) = agg_server::run_server(
+        http_port_tap_aggregator(),
+        keys.clone().0,
+        http_request_size_limit(),
+        http_response_size_limit(),
+        http_max_concurrent_connections(),
+    )
+    .await
+    .expect("Failed to start server");
+
+    // Setup client
+    let client_1 = HttpClientBuilder::default().build(server_1_address).unwrap();
+    let client_2 = HttpClientBuilder::default().build(server_2_address).unwrap();
+
+    for _ in 0..num_batches {
+        // Create your Receipt here
+        let values = query_price.clone();
+        let request_id = 0..query_price.len() as u64;
+        let mut receipts = Vec::new();
+
+        // Sign receipt
+        for value in values {
+            receipts.push(
+                (EIP712SignedMessage::new(Receipt::new(allocation_ids()[0], value).unwrap(), &keys.0)
+                    .await
+                    .expect("Failed to sign receipt"),
+                EIP712SignedMessage::new(Receipt::new(allocation_ids()[1], value).unwrap(), &keys.0)
+                    .await
+                    .expect("Failed to sign receipt"),
+            )
+        );
+        }
+
+        let req = receipts.iter().zip(request_id.clone()).collect::<Vec<_>>();
+        
+        // let start_time = std::time::Instant::now();
+        for ((receipt_1, receipt_2), id) in req.clone() {
+            let future_1: std::pin::Pin<Box<dyn Future<Output = Result<(), jsonrpsee::core::Error>> + Send>> = client_1.request("request", (id, receipt_1));
+            let future_2: std::pin::Pin<Box<dyn Future<Output = Result<(), jsonrpsee::core::Error>> + Send>> = client_2.request("request", (id, receipt_2));
+            let result = join!(future_1, future_2);
+            
+            match result.0 {
+                Ok(()) => {}
+                Err(e) => panic!("Error making receipt request: {:?}", e),
+            }
+
+            match result.1 {
+                Ok(()) => {}
+                Err(e) => panic!("Error making receipt request: {:?}", e),
+            }
+        }
+
+        }
+    Ok(())
+}
