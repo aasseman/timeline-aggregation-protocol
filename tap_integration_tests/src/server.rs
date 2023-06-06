@@ -7,9 +7,9 @@ use jsonrpsee::rpc_params;
 use jsonrpsee::server::{ServerBuilder, ServerHandle};
 use jsonrpsee::{http_client::HttpClientBuilder, proc_macros::rpc};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tap_core::Error;
+use tap_core::Error as TapCoreError;
 use tap_core::{
     adapters::{
         collateral_adapter::CollateralAdapter, rav_storage_adapter::RAVStorageAdapter,
@@ -19,6 +19,7 @@ use tap_core::{
     tap_manager::{Manager, SignedReceipt},
     tap_receipt::ReceiptCheck,
 };
+use tokio::sync::Mutex;
 
 /// Rpc trait represents a JSON-RPC server that has a single async method `request`.
 /// This method is designed to handle incoming JSON-RPC requests.
@@ -28,7 +29,7 @@ pub trait Rpc {
     #[method(name = "request")]
     async fn request(
         &self,
-        request_id: u64, // Unique identifier for the request
+        request_id: u64,        // Unique identifier for the request
         receipt: SignedReceipt, // Signed receipt associated with the request
     ) -> Result<(), jsonrpsee::types::ErrorObjectOwned>; // The result of the request, a JSON-RPC error if it fails
 }
@@ -41,16 +42,16 @@ pub trait Rpc {
 /// threshold is a limit to which receipt_count can increment, after reaching which RAV request is triggered.
 /// aggregator_client is an HTTP client used for making JSON-RPC requests to another server.
 pub struct RpcManager<
-    CA: CollateralAdapter + Send + 'static,  // An instance of CollateralAdapter, marked as thread-safe with Send and given 'static lifetime
+    CA: CollateralAdapter + Send + 'static, // An instance of CollateralAdapter, marked as thread-safe with Send and given 'static lifetime
     RCA: ReceiptChecksAdapter + Send + 'static, // An instance of ReceiptChecksAdapter
     RSA: ReceiptStorageAdapter + Send + 'static, // An instance of ReceiptStorageAdapter
     RAVSA: RAVStorageAdapter + Send + 'static, // An instance of RAVStorageAdapter
 > {
     manager: Arc<Mutex<Manager<CA, RCA, RSA, RAVSA>>>, // Manager object in a mutex for thread safety, reference counted with an Arc
     initial_checks: Vec<ReceiptCheck>, // Vector of initial checks to be performed on each request
-    receipt_count: Arc<AtomicU64>, // Thread-safe atomic counter for receipts
-    threshold: u64, // The count at which a RAV request will be triggered
-    aggregator_client: HttpClient, // HTTP client for sending requests to the aggregator server
+    receipt_count: Arc<AtomicU64>,     // Thread-safe atomic counter for receipts
+    threshold: u64,                    // The count at which a RAV request will be triggered
+    aggregator_client: HttpClient,     // HTTP client for sending requests to the aggregator server
 }
 
 /// Implementation for `RpcManager`, includes the constructor and the `request` method.
@@ -72,23 +73,22 @@ impl<
         required_checks: Vec<ReceiptCheck>,
         threshold: u64,
         aggregate_server_address: String,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             manager: Arc::new(Mutex::new(Manager::<CA, RCA, RSA, RAVSA>::new(
                 collateral_adapter,
                 receipt_checks_adapter,
                 rav_storage_adapter,
                 receipt_storage_adapter,
                 required_checks,
-                get_current_timestamp_u64_ns().unwrap(),
+                get_current_timestamp_u64_ns()?,
             ))),
             initial_checks,
             receipt_count: Arc::new(AtomicU64::new(0)),
             threshold,
             aggregator_client: HttpClientBuilder::default()
-                .build(format!("{}", aggregate_server_address))
-                .unwrap(),
-        }
+                .build(format!("{}", aggregate_server_address))?,
+        })
     }
 }
 
@@ -107,37 +107,40 @@ impl<
     ) -> Result<(), jsonrpsee::types::ErrorObjectOwned> {
         let verify_result;
         {
-            let mut manager = self.manager.lock().unwrap();
-            verify_result = manager.verify_and_store_receipt(receipt, request_id, self.initial_checks.clone());
+            let mut manager = self.manager.lock().await;
+            verify_result = match manager.verify_and_store_receipt(
+                receipt,
+                request_id,
+                self.initial_checks.clone(),
+            ) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(to_rpc_error(
+                    Box::new(e),
+                    "Failed to verify and store receipt",
+                )),
+            };
         }
 
-        match verify_result {
-            Ok(result) => {
-                // Increment the receipt count
-                self.receipt_count.fetch_add(1, Ordering::Relaxed);
+        // Increment the receipt count
+        self.receipt_count.fetch_add(1, Ordering::Relaxed);
+        let rav_request_valid = if self.receipt_count.load(Ordering::SeqCst) >= self.threshold {
+            // Reset the counter after reaching the threshold
+            self.receipt_count.store(0, Ordering::SeqCst);
 
-                if self.receipt_count.load(Ordering::SeqCst) >= self.threshold {
-                    // Reset the counter after reaching the threshold
-                    self.receipt_count.store(0, Ordering::SeqCst);
-
-                    // Create the aggregate_receipts request params
-                    let time_stamp_buffer = 0;
-                    match request_rav(
-                        &self.manager,
-                        time_stamp_buffer,
-                        &self.aggregator_client,
-                    )
-                    .await
-                    {
-                        Ok(value) => value,
-                        Err(e) => {
-                            return Err(to_rpc_error(e, "Request RAV failed"));
-                        }
-                    };
-                }
-                Ok(result)
+            // Create the aggregate_receipts request params
+            let time_stamp_buffer = 0;
+            match request_rav(&self.manager, time_stamp_buffer, &self.aggregator_client).await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(to_rpc_error(e.into(), "Failed to request rav")),
             }
-            Err(e) => Err(to_rpc_error(Box::new(e), "Verify and store receipt failed")),
+        } else {
+            Ok(())
+        };
+
+        // Combine the results
+        match (verify_result, rav_request_valid) {
+            (Ok(_), Ok(_)) => Ok(()),
+            (Err(e), _) | (_, Err(e)) => Err(e),
         }
     }
 }
@@ -152,11 +155,11 @@ async fn request_rav<
     manager: &Arc<Mutex<Manager<CA, RCA, RSA, RAVSA>>>, // Mutex-protected manager object for thread safety
     time_stamp_buffer: u64, // Buffer for timestamping, see tap_core for details
     aggregator_client: &HttpClient, // HttpClient for making requests to the tap_aggregator server
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let rav;
     // Create the aggregate_receipts request params
     {
-        let mut manager_guard = manager.lock().unwrap();
+        let mut manager_guard = manager.lock().await;
         rav = manager_guard.create_rav_request(time_stamp_buffer)?;
     }
     let params = rpc_params!(&rav.valid_receipts, None::<()>);
@@ -165,8 +168,8 @@ async fn request_rav<
         .request("aggregate_receipts", params)
         .await?;
     {
-        let mut manager_guard = manager.lock().unwrap();
-        let result = manager_guard.verify_and_store_rav(rav.expected_rav, remote_rav_result)?;
+        let mut manager_guard = manager.lock().await;
+        let _result = manager_guard.verify_and_store_rav(rav.expected_rav, remote_rav_result)?;
     }
     Ok(())
 }
@@ -178,15 +181,15 @@ pub async fn run_server<
     RSA: ReceiptStorageAdapter + Send + 'static,
     RAVSA: RAVStorageAdapter + Send + 'static,
 >(
-    port: u16, // Port on which the server will listen
-    collateral_adapter: CA, // CollateralAdapter instance
-    receipt_checks_adapter: RCA, // ReceiptChecksAdapter instance
-    receipt_storage_adapter: RSA, // ReceiptStorageAdapter instance
-    rav_storage_adapter: RAVSA, // RAVStorageAdapter instance
-    initial_checks: Vec<ReceiptCheck>, // Vector of initial checks to be performed on each request
+    port: u16,                          // Port on which the server will listen
+    collateral_adapter: CA,             // CollateralAdapter instance
+    receipt_checks_adapter: RCA,        // ReceiptChecksAdapter instance
+    receipt_storage_adapter: RSA,       // ReceiptStorageAdapter instance
+    rav_storage_adapter: RAVSA,         // RAVStorageAdapter instance
+    initial_checks: Vec<ReceiptCheck>,  // Vector of initial checks to be performed on each request
     required_checks: Vec<ReceiptCheck>, // Vector of required checks to be performed on each request
-    threshold: u64, // The count at which a RAV request will be triggered
-    aggregate_server_address: String, // Address of the aggregator server
+    threshold: u64,                     // The count at which a RAV request will be triggered
+    aggregate_server_address: String,   // Address of the aggregator server
 ) -> Result<(ServerHandle, std::net::SocketAddr)> {
     // Setting up the JSON RPC server
     println!("Starting server...");
@@ -205,17 +208,17 @@ pub async fn run_server<
         required_checks,
         threshold,
         aggregate_server_address,
-    );
+    )?;
 
     let handle = server.start(rpc_manager.into_rpc())?;
     Ok((handle, addr))
 }
 
 /// get_current_timestamp_u64_ns function returns current system time since UNIX_EPOCH as a 64-bit unsigned integer.
-fn get_current_timestamp_u64_ns() -> Result<u64, Error> {
+fn get_current_timestamp_u64_ns() -> Result<u64> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|err| Error::InvalidSystemTime {
+        .map_err(|err| TapCoreError::InvalidSystemTime {
             source_error_message: err.to_string(),
         })?
         .as_nanos() as u64)
