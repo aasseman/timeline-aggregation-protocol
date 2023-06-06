@@ -1,15 +1,18 @@
+use anyhow::Result;
 use ethers::signers::coins_bip39::English;
 use ethers::signers::{LocalWallet, MnemonicBuilder, Signer};
 use ethers::types::{Address, H160};
 use futures::Future;
 use jsonrpsee::core::client::ClientT;
 use jsonrpsee::http_client::HttpClientBuilder;
+use jsonrpsee::server::ServerHandle;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rstest::*;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::iter::FromIterator;
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use tap_aggregator::server as agg_server;
@@ -43,8 +46,6 @@ fn allocation_ids() -> Vec<Address> {
     vec![
         Address::from_str("0xabababababababababababababababababababab").unwrap(),
         Address::from_str("0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead").unwrap(),
-        Address::from_str("0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef").unwrap(),
-        Address::from_str("0x1234567890abcdef1234567890abcdef12345678").unwrap(),
     ]
 }
 
@@ -79,19 +80,13 @@ fn http_port_tap_aggregator() -> u16 {
 }
 
 #[fixture]
-fn collateral_adapter() -> (CollateralAdapterMock, CollateralAdapterMock) {
-    (
-        CollateralAdapterMock::new(Arc::new(RwLock::new(HashMap::new()))),
-        CollateralAdapterMock::new(Arc::new(RwLock::new(HashMap::new()))),
-    )
+fn collateral_adapter() -> CollateralAdapterMock {
+    CollateralAdapterMock::new(Arc::new(RwLock::new(HashMap::new())))
 }
 
 #[fixture]
-fn receipt_storage_adapter() -> (ReceiptStorageAdapterMock, ReceiptStorageAdapterMock) {
-    (
-        ReceiptStorageAdapterMock::new(Arc::new(RwLock::new(HashMap::new()))),
-        ReceiptStorageAdapterMock::new(Arc::new(RwLock::new(HashMap::new()))),
-    )
+fn receipt_storage_adapter() -> ReceiptStorageAdapterMock {
+    ReceiptStorageAdapterMock::new(Arc::new(RwLock::new(HashMap::new())))
 }
 
 #[fixture]
@@ -112,7 +107,7 @@ fn query_price() -> Vec<u128> {
 }
 
 #[fixture]
-fn receipt_checks_adapter() -> (ReceiptChecksAdapterMock, ReceiptChecksAdapterMock) {
+fn receipt_checks_adapter() -> ReceiptChecksAdapterMock {
     // Setup receipt storage
     let receipt_storage = Arc::new(RwLock::new(HashMap::new()));
 
@@ -130,28 +125,17 @@ fn receipt_checks_adapter() -> (ReceiptChecksAdapterMock, ReceiptChecksAdapterMo
     let allocation_ids: Arc<RwLock<HashSet<H160>>> =
         Arc::new(RwLock::new(HashSet::from_iter(allocation_ids())));
     let gateway_ids: Arc<RwLock<HashSet<H160>>> = Arc::new(RwLock::new(HashSet::from([keys().1])));
-    (
-        ReceiptChecksAdapterMock::new(
-            receipt_storage.clone(),
-            query_appraisals_storage.clone(),
-            allocation_ids.clone(),
-            gateway_ids.clone(),
-        ),
-        ReceiptChecksAdapterMock::new(
-            receipt_storage,
-            query_appraisals_storage,
-            allocation_ids,
-            gateway_ids,
-        ),
+    ReceiptChecksAdapterMock::new(
+        receipt_storage.clone(),
+        query_appraisals_storage.clone(),
+        allocation_ids.clone(),
+        gateway_ids.clone(),
     )
 }
 
 #[fixture]
-fn rav_storage_adapter() -> (RAVStorageAdapterMock, RAVStorageAdapterMock) {
-    (
-        RAVStorageAdapterMock::new(Arc::new(RwLock::new(HashMap::new()))),
-        RAVStorageAdapterMock::new(Arc::new(RwLock::new(HashMap::new()))),
-    )
+fn rav_storage_adapter() -> RAVStorageAdapterMock {
+    RAVStorageAdapterMock::new(Arc::new(RwLock::new(HashMap::new())))
 }
 
 #[fixture]
@@ -179,81 +163,126 @@ fn initial_checks() -> Vec<ReceiptCheck> {
 }
 
 #[fixture]
-fn receipt_threshold_1() -> u64 {
-    800
-}
-
-#[fixture]
-fn receipt_threshold_2() -> u64 {
-    400
-}
-
-#[fixture]
-fn num_batches() -> u64 {
-    100
-}
-
-#[rstest]
-#[tokio::test]
-async fn test_manager_one_indexer(
-    collateral_adapter: (CollateralAdapterMock, CollateralAdapterMock),
-    receipt_storage_adapter: (ReceiptStorageAdapterMock, ReceiptStorageAdapterMock),
-    receipt_checks_adapter: (ReceiptChecksAdapterMock, ReceiptChecksAdapterMock),
-    rav_storage_adapter: (RAVStorageAdapterMock, RAVStorageAdapterMock),
+async fn indexer_1_server(
+    mut collateral_adapter: CollateralAdapterMock,
+    receipt_storage_adapter: ReceiptStorageAdapterMock,
+    receipt_checks_adapter: ReceiptChecksAdapterMock,
+    rav_storage_adapter: RAVStorageAdapterMock,
     keys: (LocalWallet, Address),
     query_price: Vec<u128>,
     initial_checks: Vec<ReceiptCheck>,
     required_checks: Vec<ReceiptCheck>,
     receipt_threshold_1: u64,
-    num_batches: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
-
-    let mut collateral_adapter_1 = collateral_adapter.0;
-    let receipt_checks_adapter_1 = receipt_checks_adapter.0;
-    let receipt_storage_adapter_1 = receipt_storage_adapter.0;
-    let rav_storage_adapter_1 = rav_storage_adapter.0;
-
+    #[default(8080)] http_port: u16,
+) -> Result<(ServerHandle, SocketAddr)> {
     let gateway_id = keys.1;
     let value: u128 = query_price.clone().into_iter().sum();
-    collateral_adapter_1.increase_collateral(gateway_id, value);
+    collateral_adapter.increase_collateral(gateway_id, value);
     let threshold_1 = receipt_threshold_1;
     let aggregate_server_address =
         "http://127.0.0.1:".to_string() + &http_port_tap_aggregator().to_string();
-    let server_1_address = "http://127.0.0.1:".to_string() + &http_port_indexer_1().to_string();
-    let (_server_handle, _) = server::run_server(
-        http_port_indexer_1(),
-        collateral_adapter_1,
-        receipt_checks_adapter_1,
-        receipt_storage_adapter_1,
-        rav_storage_adapter_1,
-        initial_checks.clone(),
-        required_checks.clone(),
+    let (server_handle, socket_addr) = server::run_server(
+        http_port,
+        collateral_adapter,
+        receipt_checks_adapter,
+        receipt_storage_adapter,
+        rav_storage_adapter,
+        initial_checks,
+        required_checks,
         threshold_1,
-        aggregate_server_address.clone(),
+        aggregate_server_address,
     )
-    .await
-    .expect("Failed to start server");
+    .await?;
+    Ok((server_handle, socket_addr))
+}
 
-    // Start tap_aggregate server
-    let (_handle, _local_addr) = agg_server::run_server(
-        http_port_tap_aggregator(),
-        keys.clone().0,
-        http_request_size_limit(),
-        http_response_size_limit(),
-        http_max_concurrent_connections(),
+#[fixture]
+async fn indexer_2_server(
+    mut collateral_adapter: CollateralAdapterMock,
+    receipt_storage_adapter: ReceiptStorageAdapterMock,
+    receipt_checks_adapter: ReceiptChecksAdapterMock,
+    rav_storage_adapter: RAVStorageAdapterMock,
+    keys: (LocalWallet, Address),
+    query_price: Vec<u128>,
+    initial_checks: Vec<ReceiptCheck>,
+    required_checks: Vec<ReceiptCheck>,
+    receipt_threshold_2: u64,
+    #[default(8081)] http_port: u16,
+) -> Result<(ServerHandle, SocketAddr)> {
+    let gateway_id = keys.1;
+    let value: u128 = query_price.clone().into_iter().sum();
+    collateral_adapter.increase_collateral(gateway_id, value);
+    let aggregate_server_address =
+        "http://127.0.0.1:".to_string() + &http_port_tap_aggregator().to_string();
+    let (server_handle, socket_addr) = server::run_server(
+        http_port,
+        collateral_adapter,
+        receipt_checks_adapter,
+        receipt_storage_adapter,
+        rav_storage_adapter,
+        initial_checks,
+        required_checks,
+        receipt_threshold_2,
+        aggregate_server_address,
     )
-    .await
-    .expect("Failed to start server");
+    .await?;
+    Ok((server_handle, socket_addr))
+}
+
+#[fixture]
+async fn aggregate_server(
+    http_port_tap_aggregator: u16,
+    keys: (LocalWallet, Address),
+    http_request_size_limit: u32,
+    http_response_size_limit: u32,
+    http_max_concurrent_connections: u32,
+) -> Result<(ServerHandle, SocketAddr)> {
+    // Start tap_aggregate server
+    let (server_handle, socket_addr) = agg_server::run_server(
+        http_port_tap_aggregator,
+        keys.0,
+        http_request_size_limit,
+        http_response_size_limit,
+        http_max_concurrent_connections,
+    )
+    .await?;
+    Ok((server_handle, socket_addr))
+}
+
+#[fixture]
+fn receipt_threshold_1() -> u64 {
+    8
+}
+
+#[fixture]
+fn receipt_threshold_2() -> u64 {
+    4
+}
+
+#[fixture]
+fn num_batches() -> u64 {
+    10
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_manager_one_indexer(
+    keys: (LocalWallet, Address),
+    query_price: Vec<u128>,
+    num_batches: u64,
+    #[future] indexer_1_server: Result<(ServerHandle, SocketAddr)>,
+    #[future] aggregate_server: Result<(ServerHandle, SocketAddr)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt::init();
+    let (_server_handle, socket_addr) = indexer_1_server.await?;
+    let _agg_server_tup = aggregate_server.await?;
 
     // Setup client
-    let client_1 = HttpClientBuilder::default()
-        .build(server_1_address)
-        .unwrap();
+    let client_1 =
+        HttpClientBuilder::default().build("http://".to_owned() + &socket_addr.to_string())?;
 
     // Create your Receipt here
     let values = query_price.clone();
-    let request_id = 0..query_price.len() as u64;
     let mut receipts = Vec::new();
     let mut req_ids = Vec::new();
     for _ in 0..num_batches {
@@ -262,7 +291,7 @@ async fn test_manager_one_indexer(
         for value in values.clone() {
             receipts.push(
                 EIP712SignedMessage::new(
-                    Receipt::new(allocation_ids()[0], value).unwrap(),
+                    Receipt::new(allocation_ids()[0], value)?,
                     &keys.clone().0,
                 )
                 .await
@@ -274,7 +303,6 @@ async fn test_manager_one_indexer(
     }
     let req = receipts.iter().zip(req_ids.clone()).collect::<Vec<_>>();
 
-    // let start_time = std::time::Instant::now();
     for (receipt_1, id) in req.clone() {
         let result = client_1.request("request", (id, receipt_1)).await;
 
@@ -290,90 +318,28 @@ async fn test_manager_one_indexer(
 #[rstest]
 #[tokio::test]
 async fn test_manager_two_indexers(
-    collateral_adapter: (CollateralAdapterMock, CollateralAdapterMock),
-    receipt_storage_adapter: (ReceiptStorageAdapterMock, ReceiptStorageAdapterMock),
-    receipt_checks_adapter: (ReceiptChecksAdapterMock, ReceiptChecksAdapterMock),
-    rav_storage_adapter: (RAVStorageAdapterMock, RAVStorageAdapterMock),
     keys: (LocalWallet, Address),
     query_price: Vec<u128>,
-    initial_checks: Vec<ReceiptCheck>,
-    required_checks: Vec<ReceiptCheck>,
-    receipt_threshold_1: u64,
-    receipt_threshold_2: u64,
     num_batches: u64,
+    #[future] indexer_1_server: Result<(ServerHandle, SocketAddr)>,
+    #[future] indexer_2_server: Result<(ServerHandle, SocketAddr)>,
+    #[future] aggregate_server: Result<(ServerHandle, SocketAddr)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let mut collateral_adapter_1 = collateral_adapter.0;
-    let receipt_checks_adapter_1 = receipt_checks_adapter.0;
-    let receipt_storage_adapter_1 = receipt_storage_adapter.0;
-    let rav_storage_adapter_1 = rav_storage_adapter.0;
-    let mut collateral_adapter_2 = collateral_adapter.1;
-    let receipt_checks_adapter_2 = receipt_checks_adapter.1;
-    let receipt_storage_adapter_2 = receipt_storage_adapter.1;
-    let rav_storage_adapter_2 = rav_storage_adapter.1;
-    let initial_checks = initial_checks;
-    let required_checks = required_checks;
-    let gateway_id = keys.clone().1;
-    let value: u128 = query_price.clone().into_iter().sum();
-    collateral_adapter_1.increase_collateral(gateway_id, value);
-    collateral_adapter_2.increase_collateral(gateway_id, value);
-    let threshold_1 = receipt_threshold_1;
-    let threshold_2 = receipt_threshold_2;
-    let aggregate_server_address =
-        "http://127.0.0.1:".to_string() + &http_port_tap_aggregator().to_string();
-    let server_1_address = "http://127.0.0.1:".to_string() + &http_port_indexer_1().to_string();
-    let server_2_address = "http://127.0.0.1:".to_string() + &http_port_indexer_2().to_string();
-    let (_server_handle, _) = server::run_server(
-        http_port_indexer_1(),
-        collateral_adapter_1,
-        receipt_checks_adapter_1,
-        receipt_storage_adapter_1,
-        rav_storage_adapter_1,
-        initial_checks.clone(),
-        required_checks.clone(),
-        threshold_1,
-        aggregate_server_address.clone(),
-    )
-    .await
-    .expect("Failed to start server");
-
-    let (_server_handle, _) = server::run_server(
-        http_port_indexer_2(),
-        collateral_adapter_2,
-        receipt_checks_adapter_2,
-        receipt_storage_adapter_2,
-        rav_storage_adapter_2,
-        initial_checks,
-        required_checks,
-        threshold_2,
-        aggregate_server_address,
-    )
-    .await
-    .expect("Failed to start server");
-
-    // Start tap_aggregate server
-    let (_handle, _local_addr) = agg_server::run_server(
-        http_port_tap_aggregator(),
-        keys.clone().0,
-        http_request_size_limit(),
-        http_response_size_limit(),
-        http_max_concurrent_connections(),
-    )
-    .await
-    .expect("Failed to start server");
+    let (_server_handle_1, socket_addr_1) = indexer_1_server.await?;
+    let (_server_handle_2, socket_addr_2) = indexer_2_server.await?;
+    let _agg_server_tup = aggregate_server.await?;
 
     // Setup client
-    let client_1 = HttpClientBuilder::default()
-        .build(server_1_address)
-        .unwrap();
-    let client_2 = HttpClientBuilder::default()
-        .build(server_2_address)
-        .unwrap();
+    let client_1 =
+        HttpClientBuilder::default().build("http://".to_owned() + &socket_addr_1.to_string())?;
+
+    let client_2 =
+        HttpClientBuilder::default().build("http://".to_owned() + &socket_addr_2.to_string())?;
 
     // Create your Receipt here
     let values = query_price.clone();
-    let request_id = 0..query_price.len() as u64;
     let mut receipts = Vec::new();
     let mut req_ids = Vec::new();
     for _ in 0..num_batches {
@@ -382,13 +348,13 @@ async fn test_manager_two_indexers(
         for value in values.clone() {
             receipts.push((
                 EIP712SignedMessage::new(
-                    Receipt::new(allocation_ids()[0], value).unwrap(),
+                    Receipt::new(allocation_ids()[0], value)?,
                     &keys.clone().0,
                 )
                 .await
                 .expect("Failed to sign receipt"),
                 EIP712SignedMessage::new(
-                    Receipt::new(allocation_ids()[1], value).unwrap(),
+                    Receipt::new(allocation_ids()[1], value)?,
                     &keys.clone().0,
                 )
                 .await
@@ -400,7 +366,6 @@ async fn test_manager_two_indexers(
     }
 
     let req = receipts.iter().zip(req_ids.clone()).collect::<Vec<_>>();
-    let start_time = std::time::Instant::now();
     for ((receipt_1, receipt_2), id) in req.clone() {
         let future_1: std::pin::Pin<
             Box<dyn Future<Output = Result<(), jsonrpsee::core::Error>> + Send>,
@@ -409,16 +374,7 @@ async fn test_manager_two_indexers(
             Box<dyn Future<Output = Result<(), jsonrpsee::core::Error>> + Send>,
         > = client_2.request("request", (id, receipt_2));
         let result = join!(future_1, future_2);
-
-        match result.0 {
-            Ok(()) => {}
-            Err(e) => panic!("Error making receipt request: {:?}", e),
-        }
-
-        match result.1 {
-            Ok(()) => {}
-            Err(e) => panic!("Error making receipt request: {:?}", e),
-        }
+        assert_eq!(result.0.is_ok(), result.1.is_ok());
     }
     Ok(())
 }

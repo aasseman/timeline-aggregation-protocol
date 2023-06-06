@@ -169,7 +169,7 @@ async fn request_rav<
         .await?;
     {
         let mut manager_guard = manager.lock().await;
-        let _result = manager_guard.verify_and_store_rav(rav.expected_rav, remote_rav_result)?;
+        manager_guard.verify_and_store_rav(rav.expected_rav, remote_rav_result)?;
     }
     Ok(())
 }
