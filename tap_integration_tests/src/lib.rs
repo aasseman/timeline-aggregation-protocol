@@ -55,7 +55,7 @@ fn http_response_size_limit() -> u32 {
 
 #[fixture]
 fn http_max_concurrent_connections() -> u32 {
-    1
+    2
 }
 
 #[fixture]
@@ -106,7 +106,7 @@ fn query_price() -> Vec<u128> {
 #[fixture]
 fn receipt_checks_adapter() -> (ReceiptChecksAdapterMock, ReceiptChecksAdapterMock) {
     // Setup receipt storage
-    let receipt_storage = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+    let receipt_storage = Arc::new(RwLock::new(HashMap::new()));
 
     let query_prices = query_price();
     // Setup query appraisals
@@ -168,17 +168,17 @@ fn initial_checks() -> Vec<ReceiptCheck> {
 
 #[fixture]
 fn receipt_threshold_1() -> u64 {
-    11
+    800
 }
 
 #[fixture]
 fn receipt_threshold_2() -> u64 {
-    15
+    400
 }
 
 #[fixture]
 fn num_batches() -> u64 {
-    1
+    100
 }
 
 #[rstest]
@@ -240,34 +240,38 @@ async fn test_manager_one_servers(
     // Setup client
     let client_1 = HttpClientBuilder::default().build(server_1_address).unwrap();
 
+    
+    // Create your Receipt here
+    let values = query_price.clone();
+    let request_id = 0..query_price.len() as u64;
+    let mut receipts = Vec::new();
+    let mut req_ids = Vec::new();
     for _ in 0..num_batches {
-        // Create your Receipt here
-        let values = query_price.clone();
-        let request_id = 0..query_price.len() as u64;
-        let mut receipts = Vec::new();
-
+        let mut counter = 0u64;
         // Sign receipt
-        for value in values {
+        for value in values.clone() {
             receipts.push(EIP712SignedMessage::new(Receipt::new(allocation_ids()[0], value).unwrap(), &keys.clone().0)
                     .await
                     .expect("Failed to sign receipt")
-        );
+            );
+            req_ids.push(counter);
+            counter += 1;
         }
-
-        let req = receipts.iter().zip(request_id.clone()).collect::<Vec<_>>();
+    }
+    let req = receipts.iter().zip(req_ids.clone()).collect::<Vec<_>>();
+    
+    // let start_time = std::time::Instant::now();
+    for (receipt_1, id) in req.clone() {
+        let result  = client_1.request("request", (id, receipt_1)).await;
         
-        // let start_time = std::time::Instant::now();
-        for (receipt_1, id) in req.clone() {
-            let result  = client_1.request("request", (id, receipt_1)).await;
-            
-            match result {
-                Ok(()) => {}
-                Err(e) => panic!("Error making receipt request: {:?}", e),
-            }
-
+        match result {
+            Ok(()) => {}
+            Err(e) => panic!("Error making receipt request: {:?}", e),
         }
 
-        }
+    }
+
+        
     Ok(())
 }
 
@@ -292,19 +296,18 @@ async fn test_manager_two_servers(
     use tap_core::eip_712_signed_message::EIP712SignedMessage;
     use tap_core::tap_receipt::Receipt;
 
+    tracing_subscriber::fmt::init();
+
     let mut collateral_adapter_1 = collateral_adapter.0;
     let receipt_checks_adapter_1 = receipt_checks_adapter.0;
     let receipt_storage_adapter_1 = receipt_storage_adapter.0;
     let rav_storage_adapter_1 = rav_storage_adapter.0;
-
     let mut collateral_adapter_2 = collateral_adapter.1;
     let receipt_checks_adapter_2 = receipt_checks_adapter.1;
     let receipt_storage_adapter_2 = receipt_storage_adapter.1;
     let rav_storage_adapter_2 = rav_storage_adapter.1;
-
     let initial_checks = initial_checks;
     let required_checks = required_checks;
-
     let gateway_id = keys.clone().1;
     let value: u128 = query_price.clone().into_iter().sum();
     collateral_adapter_1.increase_collateral(gateway_id, value);
@@ -341,6 +344,7 @@ async fn test_manager_two_servers(
     )
     .await
     .expect("Failed to start server");
+    
     // Start tap_aggregate server
     let (_handle, _local_addr) = agg_server::run_server(
         http_port_tap_aggregator(),
@@ -356,28 +360,30 @@ async fn test_manager_two_servers(
     let client_1 = HttpClientBuilder::default().build(server_1_address).unwrap();
     let client_2 = HttpClientBuilder::default().build(server_2_address).unwrap();
 
+    // Create your Receipt here
+    let values = query_price.clone();
+    let request_id = 0..query_price.len() as u64;
+    let mut receipts = Vec::new();
+    let mut req_ids = Vec::new();
     for _ in 0..num_batches {
-        // Create your Receipt here
-        let values = query_price.clone();
-        let request_id = 0..query_price.len() as u64;
-        let mut receipts = Vec::new();
-
+        let mut counter = 0u64;
         // Sign receipt
-        for value in values {
-            receipts.push(
-                (EIP712SignedMessage::new(Receipt::new(allocation_ids()[0], value).unwrap(), &keys.0)
+        for value in values.clone() {
+            receipts.push((EIP712SignedMessage::new(Receipt::new(allocation_ids()[0], value).unwrap(), &keys.clone().0)
                     .await
-                    .expect("Failed to sign receipt"),
-                EIP712SignedMessage::new(Receipt::new(allocation_ids()[1], value).unwrap(), &keys.0)
+                    .expect("Failed to sign receipt")
+            ,
+            EIP712SignedMessage::new(Receipt::new(allocation_ids()[1], value).unwrap(), &keys.clone().0)
                     .await
-                    .expect("Failed to sign receipt"),
-            )
-        );
+                    .expect("Failed to sign receipt")
+            ));
+            req_ids.push(counter);
+            counter += 1;
         }
+    }
 
-        let req = receipts.iter().zip(request_id.clone()).collect::<Vec<_>>();
-        
-        // let start_time = std::time::Instant::now();
+        let req = receipts.iter().zip(req_ids.clone()).collect::<Vec<_>>();
+        let start_time = std::time::Instant::now();
         for ((receipt_1, receipt_2), id) in req.clone() {
             let future_1: std::pin::Pin<Box<dyn Future<Output = Result<(), jsonrpsee::core::Error>> + Send>> = client_1.request("request", (id, receipt_1));
             let future_2: std::pin::Pin<Box<dyn Future<Output = Result<(), jsonrpsee::core::Error>> + Send>> = client_2.request("request", (id, receipt_2));
@@ -392,8 +398,6 @@ async fn test_manager_two_servers(
                 Ok(()) => {}
                 Err(e) => panic!("Error making receipt request: {:?}", e),
             }
-        }
-
         }
     Ok(())
 }

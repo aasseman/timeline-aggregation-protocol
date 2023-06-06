@@ -53,7 +53,6 @@ pub struct RpcManager<
     aggregator_client: HttpClient, // HTTP client for sending requests to the aggregator server
 }
 
-
 /// Implementation for `RpcManager`, includes the constructor and the `request` method.
 /// Constructor initializes a new instance of `RpcManager`.
 /// `request` method handles incoming JSON-RPC requests and it verifies and stores the receipt from the request.
@@ -92,6 +91,7 @@ impl<
         }
     }
 }
+
 #[async_trait]
 impl<
         CA: CollateralAdapter + Send + 'static,
@@ -105,12 +105,13 @@ impl<
         request_id: u64,
         receipt: SignedReceipt,
     ) -> Result<(), jsonrpsee::types::ErrorObjectOwned> {
-        let result = Arc::clone(&self.manager)
-            .lock()
-            .unwrap()
-            .verify_and_store_receipt(receipt, request_id, self.initial_checks.clone());
+        let verify_result;
+        {
+            let mut manager = self.manager.lock().unwrap();
+            verify_result = manager.verify_and_store_receipt(receipt, request_id, self.initial_checks.clone());
+        }
 
-        match result {
+        match verify_result {
             Ok(result) => {
                 // Increment the receipt count
                 self.receipt_count.fetch_add(1, Ordering::Relaxed);
@@ -118,34 +119,25 @@ impl<
                 if self.receipt_count.load(Ordering::SeqCst) >= self.threshold {
                     // Reset the counter after reaching the threshold
                     self.receipt_count.store(0, Ordering::SeqCst);
-                    println!("Requesting RAV...");
 
                     // Create the aggregate_receipts request params
                     let time_stamp_buffer = 0;
                     match request_rav(
-                        Arc::clone(&self.manager),
+                        &self.manager,
                         time_stamp_buffer,
-                        self.aggregator_client.clone(),
+                        &self.aggregator_client,
                     )
                     .await
                     {
                         Ok(value) => value,
                         Err(e) => {
-                            return Err(jsonrpsee::types::ErrorObject::owned(
-                                -32000,
-                                e.to_string() + " - Rav request failed",
-                                None::<()>,
-                            ))
+                            return Err(to_rpc_error(e, "Request RAV failed"));
                         }
                     };
                 }
                 Ok(result)
             }
-            Err(e) => Err(jsonrpsee::types::ErrorObject::owned(
-                -32000,
-                e.to_string() + " - Verify and store receipt failed",
-                None::<()>,
-            )),
+            Err(e) => Err(to_rpc_error(Box::new(e), "Verify and store receipt failed")),
         }
     }
 }
@@ -157,25 +149,25 @@ async fn request_rav<
     RSA: ReceiptStorageAdapter + Send + 'static,
     RAVSA: RAVStorageAdapter + Send + 'static,
 >(
-    manager: Arc<Mutex<Manager<CA, RCA, RSA, RAVSA>>>, // Mutex-protected manager object for thread safety
+    manager: &Arc<Mutex<Manager<CA, RCA, RSA, RAVSA>>>, // Mutex-protected manager object for thread safety
     time_stamp_buffer: u64, // Buffer for timestamping, see tap_core for details
-    aggregator_client: HttpClient, // HttpClient for making requests to the tap_aggregator server
+    aggregator_client: &HttpClient, // HttpClient for making requests to the tap_aggregator server
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let rav;
     // Create the aggregate_receipts request params
-    let rav = manager
-        .lock()
-        .unwrap()
-        .create_rav_request(time_stamp_buffer)?;
+    {
+        let mut manager_guard = manager.lock().unwrap();
+        rav = manager_guard.create_rav_request(time_stamp_buffer)?;
+    }
     let params = rpc_params!(&rav.valid_receipts, None::<()>);
     // Call the aggregate_receipts method on the other server
     let remote_rav_result = aggregator_client
         .request("aggregate_receipts", params)
         .await?;
-    let _result = manager
-        .clone()
-        .lock()
-        .unwrap()
-        .verify_and_store_rav(rav.expected_rav, remote_rav_result)?;
+    {
+        let mut manager_guard = manager.lock().unwrap();
+        let result = manager_guard.verify_and_store_rav(rav.expected_rav, remote_rav_result)?;
+    }
     Ok(())
 }
 
@@ -227,4 +219,8 @@ fn get_current_timestamp_u64_ns() -> Result<u64, Error> {
             source_error_message: err.to_string(),
         })?
         .as_nanos() as u64)
+}
+
+fn to_rpc_error(e: Box<dyn std::error::Error>, msg: &str) -> jsonrpsee::types::ErrorObjectOwned {
+    jsonrpsee::types::ErrorObject::owned(-32000, format!("{} - {}", e.to_string(), msg), None::<()>)
 }
