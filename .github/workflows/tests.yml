@@ -3,7 +3,7 @@ name: tests
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -11,45 +11,45 @@ jobs:
   check:
     name: cargo check
     runs-on: ubuntu-latest
-    container: 
-      image: rust:latest 
+    container:
+      image: rust:latest
     steps:
       - uses: actions/checkout@v2
       - run: cargo check
-        
+
   test:
     name: cargo test
     runs-on: ubuntu-latest
-    container: 
+    container:
       image: rust:latest
     steps:
       - uses: actions/checkout@v2
       - run: cargo test
-        
+
   fmt:
     name: cargo fmt
     runs-on: ubuntu-latest
-    container: 
+    container:
       image: rust:latest
     steps:
       - uses: actions/checkout@v2
       - run: |
           rustup component add rustfmt
           cargo fmt --all -- --check
-          
+
   clippy:
     name: cargo clippy
     runs-on: ubuntu-latest
-    container: 
+    container:
       image: rust:latest
     steps:
       - uses: actions/checkout@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
       - run: |
-           rustup component add clippy
-           cargo clippy --all-features -- -D clippy::all
-  
+          rustup component add clippy
+          cargo clippy --all-features -- -D clippy::all
+
   code-coverage:
     runs-on: ubuntu-latest
     permissions:
@@ -61,12 +61,12 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Update Rust and Install LLVM Tools
-        run: | 
-            rustup update stable
-            rustup component add llvm-tools-preview
-            cargo install cargo-llvm-cov
+        run: |
+          rustup update stable
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov
       - name: Generate Code Coverage and PR
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info 
+        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
       - uses: romeovs/lcov-reporter-action@v0.3.1
         with:
           lcov-file: lcov.info
@@ -87,17 +87,17 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install Cargo Audit
         run: |
-              cargo install cargo-audit
+          cargo install cargo-audit
 
       - name: Generate Cargo Audit Report
         id: report
         run: |
-           cargo audit | tee report.xml
-           body="$(cat report.xml)"
-           delimiter="$(openssl rand -hex 8)"
-           echo "body<<$delimiter" >> $GITHUB_OUTPUT
-           echo "$body" >> $GITHUB_OUTPUT
-           echo "$delimiter" >> $GITHUB_OUTPUT
+          cargo audit | tee report.xml
+          body="$(cat report.xml)"
+          delimiter="$(openssl rand -hex 8)"
+          echo "body<<$delimiter" >> $GITHUB_OUTPUT
+          echo "$body" >> $GITHUB_OUTPUT
+          echo "$delimiter" >> $GITHUB_OUTPUT
 
       - name: Report Folding
         uses: actions/github-script@v6
@@ -122,35 +122,43 @@ jobs:
               repo: context.repo.repo,
               body: output
             })
-  
+
   sbom:
-   name: Syft SBOM Generator
-   runs-on: ubuntu-20.04
-   env:
-    REPO_NAME: ${{ github.event.repository.name }}
-    REPORT_FOLDER: ${{ github.event.repository.name }}-sbom-report
-   steps:
-       - uses: actions/checkout@v2
-         with:
-           token: ${{ secrets.GITHUB_TOKEN }}
-       - run: |
-           curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b .
-           mkdir "${{ env.REPORT_FOLDER }}"
-           ./syft .  --scope all-layers -o cyclonedx-xml=${{ env.REPORT_FOLDER }}/sbom-report.$(date "+%Y.%m.%d-%H.%M").xml
-           ./syft .  --scope all-layers -o cyclonedx-json=${{ env.REPORT_FOLDER }}/sbom-report.$(date "+%Y.%m.%d-%H.%M").json
-           cp ${{ env.REPORT_FOLDER }}/*.xml sbom-report.xml      
-           curl -X 'POST' 'http://34.149.248.118/api/v1/bom' \
-                        -H 'Content-Type: multipart/form-data' \
-                        -H 'X-API-Key: ${{ secrets.DEPENDENCYTRACK_APIKEY }}' \
-                        -F 'autoCreate=true' \
-                        -F 'projectVersion=1.0' \
-                        -F "projectName=${{ env.REPO_NAME }}" \
-                        -F 'bom=@sbom-report.xml'
-       - uses: 'google-github-actions/auth@v1'
-         with:
-            credentials_json: '${{ secrets.GHA_SA_KEY }}'
-       - uses: 'google-github-actions/upload-cloud-storage@v1'
-         with:
-            process_gcloudignore: false
-            path: '${{ env.REPORT_FOLDER }}/'
-            destination: 'security-sbom'
+    name: Syft SBOM Generator
+    runs-on: ubuntu-20.04
+    env:
+      REPO_NAME: ${{ github.event.repository.name }}
+      REPORT_FOLDER: ${{ github.event.repository.name }}-sbom-report
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b .
+          mkdir "${{ env.REPORT_FOLDER }}"
+          ./syft .  --scope all-layers -o cyclonedx-xml=${{ env.REPORT_FOLDER }}/sbom-report.$(date "+%Y.%m.%d-%H.%M").xml
+          ./syft .  --scope all-layers -o cyclonedx-json=${{ env.REPORT_FOLDER }}/sbom-report.$(date "+%Y.%m.%d-%H.%M").json
+          cp ${{ env.REPORT_FOLDER }}/*.xml sbom-report.xml      
+          curl -X 'POST' 'http://34.149.248.118/api/v1/bom' \
+                       -H 'Content-Type: multipart/form-data' \
+                       -H 'X-API-Key: ${{ secrets.DEPENDENCYTRACK_APIKEY }}' \
+                       -F 'autoCreate=true' \
+                       -F 'projectVersion=1.0' \
+                       -F "projectName=${{ env.REPO_NAME }}" \
+                       -F 'bom=@sbom-report.xml'
+      - uses: "google-github-actions/auth@v1"
+        with:
+          credentials_json: "${{ secrets.GHA_SA_KEY }}"
+      - uses: "google-github-actions/upload-cloud-storage@v1"
+        with:
+          process_gcloudignore: false
+          path: "${{ env.REPORT_FOLDER }}/"
+          destination: "security-sbom"
+
+  semver-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Check semver
+        uses: obi1kenobi/cargo-semver-checks-action@v2
