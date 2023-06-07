@@ -44,6 +44,7 @@ impl ReceiptAggregateVoucher {
     ///
     /// Returns [`Error::AggregateOverflow`] if any receipt value causes aggregate value to overflow
     ///
+    /// 
     pub fn aggregate_receipts(
         allocation_id: Address,
         receipts: &[EIP712SignedMessage<Receipt>],
