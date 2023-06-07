@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0](https://github.com/aasseman/timeline-aggregation-protocol/compare/tap_core-v0.1.0...tap_core-v0.2.0) (2023-06-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* dummy
+
+### Features
+
+* dummy ([e950c9f](https://github.com/aasseman/timeline-aggregation-protocol/commit/e950c9fe37fdc1d5b3f58d7b5ca759f51f884388))
+
 ## 0.1.0 (2023-06-07)
 
 
