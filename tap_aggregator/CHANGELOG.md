@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/aasseman/timeline-aggregation-protocol/compare/tap_aggregator-v0.1.0...tap_aggregator-v0.1.1) (2023-06-07)
+
+
+### Bug Fixes
+
+* dummy ([2f08469](https://github.com/aasseman/timeline-aggregation-protocol/commit/2f0846912e54a1ce7be7c985b7e3dfd670d0061e))
+
 ## 0.1.0 (2023-06-07)
 
 
