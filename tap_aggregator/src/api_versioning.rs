@@ -11,6 +11,7 @@ use strum::{self, IntoEnumIterator};
 /// The version numbers are independent of the TAP software version. As such, we are
 /// enabling the introduction of breaking changes to the TAP library interface without
 /// necessarily introducing breaking changes to the JSON-RPC API (or vice versa).
+/// 
 #[derive(
     Clone,
     Debug,
