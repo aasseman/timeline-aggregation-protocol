@@ -5,10 +5,7 @@
   "bump-patch-for-minor-pre-major": true,
   "prerelease": true,
   "draft": false,
-  "packages": {
-    "tap_core": {},
-    "tap_aggregator": {}
-  },
+  "packages": {},
   "plugins": [
     {
       "type": "cargo-workspace"
