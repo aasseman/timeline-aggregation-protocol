@@ -1,5 +1,7 @@
 # Changelog
 
+
+
 ## [0.1.1](https://github.com/aasseman/timeline-aggregation-protocol/compare/tap_aggregator-v0.1.0...tap_aggregator-v0.1.1) (2023-06-07)
 
 
