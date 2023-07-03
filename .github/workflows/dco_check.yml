@@ -21,6 +21,7 @@ jobs:
         uses: actions/setup-python@v2
         with:
           python-version: '3.x'
+          cache: 'pip'
       - name: Check DCO
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
