@@ -120,11 +120,10 @@ jobs:
           hide_and_recreate: true
           hide_classify: "OUTDATED"
           message: |
-            #### 🤖 **** Cargo Audit Report **** 🤖
-            <details><summary>Show Report</summary>
-            \*\*\*\n
+            <details><summary>#### 🤖 **** Cargo Audit Report **** 🤖</summary>
+            ```
             ${{ steps.report.outputs.body }}
-            \`\`\`
+            ```
             </details>
   
   sbom:
