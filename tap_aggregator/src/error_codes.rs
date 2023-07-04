@@ -10,6 +10,7 @@
 //! - Warnings: `[-32050, -32099]`, where `-32050` is reserved for all warnings without a specific code.
 
 /// JSON-RPC error codes specific to the TAP aggregator.
+/// 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JsonRpcErrorCode {
     /// -32000 -- Generic error.
