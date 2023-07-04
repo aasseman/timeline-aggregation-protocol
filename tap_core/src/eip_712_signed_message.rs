@@ -3,6 +3,7 @@
 
 //! Module containing EIP712 message and signature
 //!
+//
 
 use ethereum_types::Address;
 use ethers::{
